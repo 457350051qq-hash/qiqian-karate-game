@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>七千武道 · 净心道场</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<main>
+<header><div><span class="eyebrow">QIQIAN KARATE / 第一回</span><h1>七千武道<span>净心道场</span></h1></div><button id="sound" class="subtle" aria-pressed="true">声音：开</button></header>
+<section class="arena" aria-label="游戏画面">
+<canvas id="game" width="960" height="600" aria-label="八方向空手道防守游戏"></canvas>
+<div class="hud"><span>击碎 <b id="score">0</b> / 20</span><span>漏掉 <b id="misses">0</b> / 3</span></div>
+<div id="overlay" class="overlay"><div class="card"><span class="eyebrow" id="badge">守住方寸，击破病菌</span><h2 id="title">以武，守护自己。</h2><p id="message">病菌进入金色圆环时，朝它出招！<br>方向键瞄准，空格攻击；手机用摇杆和攻击键。</p><div id="characters" class="characters"><button data-gender="male" aria-pressed="true">🥋 男性武者</button><button data-gender="female" aria-pressed="false">🥋 女性武者</button></div><button id="start" class="primary">进入道场</button><p class="small">击碎 20 个通关 · 漏掉 3 个结束</p></div></div>
+<div id="pause" hidden class="pause">已暂停 · 返回页面继续</div>
+</section>
+<section class="controls" aria-label="触控操作"><div class="joystick-wrap"><div id="joystick" role="group" aria-label="八方向虚拟摇杆"><span class="arrows">↖ ↑ ↗<br>← · →<br>↙ ↓ ↘</span><div id="knob"></div></div><span>方向 / 方向键</span></div><div class="tips"><strong id="technique">准备 · 正拳</strong><span>金色圆环 = 攻击时机</span><span>按住方向，再点击攻击</span></div><button id="attack" aria-label="攻击（空格键）">击<span>空格 / ATTACK</span></button></section>
+<footer><span>和道流拳脚灵感 · 八方迎击</span><button id="restart" class="subtle">重新开始</button></footer>
+</main><script src="game.js"></script>
+</body></html>

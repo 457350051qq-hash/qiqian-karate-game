@@ -1,7 +1,7 @@
 // Optional Chromium integration test. Requires a local server on 8000 and Chromium CDP on 9222.
 // Math.random is fixed only in the test browser so incoming germs consistently arrive from the right.
 import assert from 'node:assert/strict';
-const tabs=await(await fetch('http://127.0.0.1:9222/json')).json();
+const tabs=await(await fetch(`http://127.0.0.1:${process.env.CDP_PORT || 9222}/json`)).json();
 const ws=new WebSocket(tabs[0].webSocketDebuggerUrl);await new Promise(r=>ws.addEventListener('open',r));
 let id=0;const pending=new Map(),errors=[];
 ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(m.error):p.resolve(m.result);}if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);});
@@ -9,7 +9,7 @@ const send=(method,params={})=>new Promise((resolve,reject)=>{const n=++id;pendi
 const run=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 await send('Runtime.enable');await send('Page.enable');
-await send('Page.addScriptToEvaluateOnNewDocument',{source:'Math.random=()=>0;'});
+await send('Page.addScriptToEvaluateOnNewDocument',{source:`Math.random=()=>0; window.motionTestPermission='denied'; window.DeviceMotionEvent=class { static async requestPermission(){ return window.motionTestPermission; } };`});
 await send('Page.navigate',{url:'http://127.0.0.1:8000/'});await delay(700);
 assert.equal(await run('document.title'),'七千武道 · 净心道场');
 await run(`document.querySelector('[data-gender="female"]').click();document.getElementById('start').click()`);
@@ -29,6 +29,23 @@ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:coords.
 await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:coords.x,y:coords.y,id:1},{x:coords.bx,y:coords.by,id:2}]});
 assert.equal(await run(`document.getElementById('technique').textContent`),'上段突');
 await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+assert.equal(await run(`document.getElementById('knob').style.transform`),'');
+// Sensor APIs are mocked only in this test browser; physical iPhone hardware is not emulated.
+await run(`document.getElementById('motion').click()`);await delay(50);
+assert.ok((await run(`document.getElementById('motion-status').textContent`)).includes('未获允许'));
+await run(`window.motionTestPermission='granted';document.getElementById('motion').click()`);await delay(50);
+assert.equal(await run(`document.getElementById('motion').getAttribute('aria-pressed')`),'true');
+await run(`window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));document.getElementById('restart').click();const e=new Event('devicemotion');e.acceleration={x:20,y:0,z:0};window.dispatchEvent(e)`);
+await delay(200);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+await delay(750);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'grounded');
+await run(`document.getElementById('motion').click();document.getElementById('jump').click()`);
+await delay(200);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+await delay(750);
+await send('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyJ',key:'j'});
+await send('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyJ',key:'j'});
+await delay(200);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+await send('Emulation.setDeviceMetricsOverride',{width:844,height:390,deviceScaleFactor:1,mobile:true});await delay(200);
+assert.ok(await run(`(()=>{const c=document.getElementById('game').getBoundingClientRect(),j=document.getElementById('joystick').getBoundingClientRect(),a=document.getElementById('attack').getBoundingClientRect();return j.right<=c.left&&a.left>=c.right&&document.documentElement.scrollWidth<=innerWidth})()`),'landscape controls stay outside game canvas');
 await run(`document.getElementById('restart').click()`);await delay(10500);
 assert.equal(await run(`document.getElementById('title').textContent`),'道场失守');
 assert.equal(await run(`document.getElementById('misses').textContent`),'3');
@@ -37,5 +54,5 @@ await delay(45000);
 assert.equal(await run(`document.getElementById('title').textContent`),'二十击，守护成功！');
 assert.equal(await run(`document.getElementById('score').textContent`),'20');
 await run('clearInterval(window.autoAttack)');
-assert.deepEqual(errors,[]);console.log('PASS: load, female selection, timed keyboard hit, restart, diagonal keyboard, mobile layout, two-finger touch, three-miss defeat, twenty-hit victory; no browser JS exceptions.');
+assert.deepEqual(errors,[]);console.log('PASS: load, female selection, timed keyboard hit, restart, diagonal keyboard, mobile layout, two-finger touch, three-miss defeat, twenty-hit victory, joystick recenter, motion permission denial/grant, sensor jump, button/keyboard jump, landscape controls; no browser JS exceptions.');
 ws.close();

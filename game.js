@@ -3,14 +3,43 @@
 const TAU = Math.PI * 2;
 function directionIndex(x, y) { return (Math.round(Math.atan2(y, x) / (Math.PI / 4)) + 8) % 8; }
 function canHit(germ, direction) { return germ.distance >= 64 && germ.distance <= 152 && germ.direction === direction; }
+const JUMP_DURATION = .82;
+const SHAKE_COOLDOWN_MS = 1200;
+function joystickVector(x, y, radius, deadZone = 10) {
+  const distance = Math.hypot(x, y), k = Math.min(1, radius / (distance || 1));
+  return { x: x * k, y: y * k, direction: distance > deadZone ? directionIndex(x, y) : null };
+}
+function jumpPose(elapsed) {
+  if (elapsed < 0 || elapsed >= JUMP_DURATION) return { height: 0, squash: 1, phase: 'grounded' };
+  if (elapsed < .12) return { height: 0, squash: 1 - .18 * elapsed / .12, phase: 'takeoff' };
+  if (elapsed < .68) return { height: 82 * Math.sin(Math.PI * (elapsed - .12) / .56), squash: 1, phase: 'airborne' };
+  return { height: 0, squash: 1 - .18 * Math.sin(Math.PI * (elapsed - .68) / .14), phase: 'landing' };
+}
+function createShakeDetector() {
+  let previous = null, lastTrigger = -Infinity;
+  return {
+    reset() { previous = null; lastTrigger = -Infinity; },
+    sample(acceleration, includesGravity, now, threshold) {
+      if (!acceleration || !['x','y','z'].every(axis => Number.isFinite(acceleration[axis]))) return false;
+      const values = [acceleration.x, acceleration.y, acceleration.z];
+      // Gravity fallback uses the change between readings, ignoring a stationary phone's gravity.
+      const strength = includesGravity ? (previous ? Math.hypot(...values.map((v,i) => v - previous[i])) : 0) : Math.hypot(...values);
+      previous = values;
+      if (strength < threshold || now - lastTrigger < SHAKE_COOLDOWN_MS) return false;
+      lastTrigger = now; return true;
+    }
+  };
+}
 const techniques = ['正拳突', '下段侧踢', '下段払い', '下段逆突', '逆突', '上段受け・反击', '上段突', '上段前踢'];
-if (typeof module !== 'undefined') module.exports = { directionIndex, canHit };
+if (typeof module !== 'undefined') module.exports = { directionIndex, canHit, joystickVector, jumpPose, createShakeDetector, JUMP_DURATION, SHAKE_COOLDOWN_MS };
 if (typeof document !== 'undefined') {
 const $ = id => document.getElementById(id);
 const canvas = $('game'), ctx = canvas.getContext('2d');
 let state = 'menu', gender = 'male', direction = 0, score = 0, misses = 0;
 let germs = [], particles = [], time = 0, spawnClock = 0, attackClock = 0, cooldown = 0, last = 0, paused = false;
 let joystickPointer = null, soundOn = true, audioContext, flash = 0;
+let jumpElapsed = JUMP_DURATION, motionEnabled = false, motionPending = false, motionTimer;
+const shakeDetector = createShakeDetector();
 const keys = new Set();
 function sound(hit) {
   if (!soundOn) return;
@@ -27,9 +56,52 @@ function sound(hit) {
   } catch (_) { /* Sound is optional when Web Audio is unavailable. */ }
 }
 function setDirection(d) { direction = d; $('technique').textContent = techniques[d]; }
-function resetInput() { keys.clear(); joystickPointer = null; $('knob').style.transform = ''; }
+function resetInput() {
+  keys.clear();
+  const pointer = joystickPointer; joystickPointer = null;
+  if (pointer !== null && $('joystick').hasPointerCapture(pointer)) $('joystick').releasePointerCapture(pointer);
+  $('knob').style.transform = ''; shakeDetector.reset();
+}
+function jump() {
+  if (state !== 'playing' || paused || jumpElapsed < JUMP_DURATION) return;
+  jumpElapsed = 0;
+}
+function onMotion(event) {
+  if (!motionEnabled) return;
+  const direct = event.acceleration;
+  const hasDirect = direct && ['x','y','z'].every(axis => Number.isFinite(direct[axis]));
+  const sample = hasDirect ? direct : event.accelerationIncludingGravity;
+  if (!sample || !['x','y','z'].every(axis => Number.isFinite(sample[axis]))) return;
+  clearTimeout(motionTimer);
+  $('motion-status').textContent = '摇晃已开启 · 冷却 1.2 秒 · 也可按「跳」';
+  if (state !== 'playing' || paused) { shakeDetector.reset(); return; }
+  if (shakeDetector.sample(sample, !hasDirect, performance.now(), Number($('shake-threshold').value))) jump();
+}
+async function toggleMotion() {
+  if (motionPending) return;
+  if (motionEnabled) {
+    motionEnabled = false; window.removeEventListener('devicemotion', onMotion); clearTimeout(motionTimer); shakeDetector.reset();
+    $('motion').textContent = '开启摇晃跳跃（实验）'; $('motion').setAttribute('aria-pressed','false');
+    $('motion-status').textContent = '摇晃已关闭；可按「跳」或 J 键。'; return;
+  }
+  if (!window.isSecureContext) { $('motion-status').textContent = '摇晃需要 HTTPS 安全连接；请使用「跳」按钮。'; return; }
+  if (!window.DeviceMotionEvent) { $('motion-status').textContent = '此浏览器不支持运动传感器；请使用「跳」按钮。'; return; }
+  motionPending = true;
+  try {
+    // iOS requires this call directly inside a user-initiated button handler.
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      const permission = await DeviceMotionEvent.requestPermission();
+      if (permission !== 'granted') { $('motion-status').textContent = '运动权限未获允许；可使用「跳」按钮。'; return; }
+    }
+    motionEnabled = true; shakeDetector.reset(); window.addEventListener('devicemotion', onMotion);
+    $('motion').textContent = '关闭摇晃跳跃'; $('motion').setAttribute('aria-pressed','true');
+    $('motion-status').textContent = '等待传感器读数…也可按「跳」';
+    motionTimer = setTimeout(() => { $('motion-status').textContent = '尚未收到有效读数；请轻摇手机，或使用「跳」按钮。'; }, 3500);
+  } catch (_) { $('motion-status').textContent = '无法启用运动传感器；请使用「跳」按钮。'; }
+  finally { motionPending = false; }
+}
 function start() {
-  resetInput(); score = misses = 0; germs = []; particles = []; time = 0; spawnClock = .65; attackClock = cooldown = flash = 0;
+  resetInput(); jumpElapsed = JUMP_DURATION; score = misses = 0; germs = []; particles = []; time = 0; spawnClock = .65; attackClock = cooldown = flash = 0;
   paused = document.hidden; $('pause').hidden = !paused; state = 'playing'; setDirection(0);
   $('score').textContent = '0'; $('misses').textContent = '0'; $('overlay').hidden = true;
   sound(false);
@@ -60,6 +132,7 @@ function spawn() {
 }
 function update(dt) {
   if (state !== 'playing' || paused) return;
+  jumpElapsed = Math.min(JUMP_DURATION, jumpElapsed + dt);
   time += dt; cooldown = Math.max(0,cooldown-dt); attackClock = Math.max(0,attackClock-dt); flash = Math.max(0,flash-dt);
   spawnClock -= dt; if (spawnClock <= 0) { spawn(); spawnClock = Math.max(.85,1.6-score*.025); }
   for (let i=germs.length-1;i>=0;i--) {
@@ -74,7 +147,10 @@ function fighter() {
   const a=direction*Math.PI/4, active=attackClock>0, kick=[1,2,7].includes(direction);
   const dx=Math.cos(a),dy=Math.sin(a);
   ctx.save();ctx.translate(0,10);
-  ctx.fillStyle='#081d2055';ctx.beginPath();ctx.ellipse(0,48,43,11,0,0,TAU);ctx.fill();
+  const pose = jumpPose(jumpElapsed);
+  canvas.dataset.jumpPhase = pose.phase;
+  ctx.fillStyle='#081d2055';ctx.beginPath();ctx.ellipse(0,48,43 - pose.height*.18,11 - pose.height*.03,0,0,TAU);ctx.fill();
+  ctx.translate(0,48 - pose.height);ctx.scale(1 / Math.sqrt(pose.squash),pose.squash);ctx.translate(0,-48);
   // White gi, dark belt, guarded stance; extension follows the selected attack direction.
   line(-10,12,-24,43,'#e4eae3',15);line(10,12,24,43,'#e4eae3',15);
   if(active&&kick)line(6,12,dx*104,dy*104,'#f5f5ea',17);
@@ -115,20 +191,31 @@ function draw() {
 function frame(now){const dt=Math.min((now-last)/1000,.04);last=now;update(dt);draw();requestAnimationFrame(frame);}
 function resize(){const rect=canvas.getBoundingClientRect();canvas.width=Math.round(rect.width*Math.min(devicePixelRatio||1,2));canvas.height=Math.round(rect.height*Math.min(devicePixelRatio||1,2));}
 function keyboardDirection(){const x=Number(keys.has('ArrowRight'))-Number(keys.has('ArrowLeft')),y=Number(keys.has('ArrowDown'))-Number(keys.has('ArrowUp'));if(x||y)setDirection(directionIndex(x,y));}
-window.addEventListener('keydown',e=>{if(e.code.startsWith('Arrow')||e.code==='Space'){if(state!=='playing')return;e.preventDefault();if(e.code==='Space'){if(!e.repeat)attack();}else{keys.add(e.code);keyboardDirection();}}});
+window.addEventListener('keydown',e=>{if(e.code.startsWith('Arrow')||e.code==='Space'||e.code==='KeyJ'){if(state!=='playing')return;e.preventDefault();if(e.code==='Space'){if(!e.repeat)attack();}else if(e.code==='KeyJ'){if(!e.repeat)jump();}else{keys.add(e.code);keyboardDirection();}}});
 window.addEventListener('keyup',e=>{keys.delete(e.code);keyboardDirection();});
 window.addEventListener('blur',()=>{resetInput();if(state==='playing'){paused=true;$('pause').hidden=false;}});
 window.addEventListener('focus',()=>{paused=false;last=performance.now();$('pause').hidden=true;});
 document.addEventListener('visibilitychange',()=>{resetInput();paused=document.hidden;last=performance.now();$('pause').hidden=!paused||state!=='playing';});
 const stick=$('joystick');
-function moveStick(e){const r=stick.getBoundingClientRect(),x=e.clientX-r.left-r.width/2,y=e.clientY-r.top-r.height/2,dist=Math.hypot(x,y),limit=r.width*.3; if(dist>10)setDirection(directionIndex(x,y));const k=Math.min(1,limit/(dist||1));$('knob').style.transform=`translate(${x*k}px,${y*k}px)`;}
+function moveStick(e) {
+  const r = stick.getBoundingClientRect();
+  const radius = Math.max(0, (stick.clientWidth - $('knob').offsetWidth) / 2);
+  const vector = joystickVector(e.clientX-r.left-r.width/2, e.clientY-r.top-r.height/2, radius);
+  if (vector.direction !== null) setDirection(vector.direction);
+  $('knob').style.transform = `translate(${vector.x}px,${vector.y}px)`;
+}
 stick.addEventListener('pointerdown',e=>{if(joystickPointer!==null)return;e.preventDefault();joystickPointer=e.pointerId;stick.setPointerCapture(e.pointerId);moveStick(e);});
 stick.addEventListener('pointermove',e=>{if(e.pointerId===joystickPointer)moveStick(e);});
 for(const event of ['pointerup','pointercancel','lostpointercapture'])stick.addEventListener(event,e=>{if(e.pointerId===joystickPointer){joystickPointer=null;$('knob').style.transform='';}});
 $('attack').addEventListener('pointerdown',e=>{e.preventDefault();attack();});
 $('attack').addEventListener('click',e=>{if(e.detail===0)attack();});
+$('jump').addEventListener('pointerdown',e=>{e.preventDefault();jump();});
+$('jump').addEventListener('click',e=>{if(e.detail===0)jump();});
+$('motion').addEventListener('click',toggleMotion);
+$('shake-threshold').addEventListener('input',()=>{ $('threshold-value').textContent = `${$('shake-threshold').value} m/s²`; shakeDetector.reset(); });
 $('start').addEventListener('click',()=>{start();$('start').blur();});$('restart').addEventListener('click',start);
 for(const button of document.querySelectorAll('[data-gender]'))button.addEventListener('click',()=>{gender=button.dataset.gender;document.querySelectorAll('[data-gender]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));});
 $('sound').addEventListener('click',()=>{soundOn=!soundOn;$('sound').textContent=`声音：${soundOn?'开':'关'}`;$('sound').setAttribute('aria-pressed',String(soundOn));});
-window.addEventListener('resize',resize);resize();requestAnimationFrame(frame);
+window.addEventListener('resize',()=>{resetInput();resize();});
+window.visualViewport?.addEventListener('resize',resize);resize();requestAnimationFrame(frame);
 }

@@ -1,58 +1,87 @@
-// Optional Chromium integration test. Requires a local server on 8000 and Chromium CDP on 9222.
-// Math.random is fixed only in the test browser so incoming germs consistently arrive from the right.
+// V0.3 regression of V0.1/V0.2 flows, with a controllable animation clock for reproducibility.
+// Only the test browser receives clock, RNG and sensor mocks. Production code has no test hooks.
 import assert from 'node:assert/strict';
-const tabs=await(await fetch(`http://127.0.0.1:${process.env.CDP_PORT || 9222}/json`)).json();
-const ws=new WebSocket(tabs[0].webSocketDebuggerUrl);await new Promise(r=>ws.addEventListener('open',r));
-let id=0;const pending=new Map(),errors=[];
-ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(m.error):p.resolve(m.result);}if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);});
-const send=(method,params={})=>new Promise((resolve,reject)=>{const n=++id;pending.set(n,{resolve,reject});ws.send(JSON.stringify({id:n,method,params}));});
-const run=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
-const delay=ms=>new Promise(r=>setTimeout(r,ms));
-await send('Runtime.enable');await send('Page.enable');
-await send('Page.addScriptToEvaluateOnNewDocument',{source:`Math.random=()=>0; window.motionTestPermission='denied'; window.DeviceMotionEvent=class { static async requestPermission(){ return window.motionTestPermission; } };`});
-await send('Page.navigate',{url:'http://127.0.0.1:8000/'});await delay(700);
-assert.equal(await run('document.title'),'七千武道 · 净心道场');
-await run(`document.querySelector('[data-gender="female"]').click();document.getElementById('start').click()`);
-assert.equal(await run(`document.querySelector('[data-gender="female"]').getAttribute('aria-pressed')`),'true');
-await delay(3900);
-await send('Input.dispatchKeyEvent',{type:'keyDown',code:'Space',key:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',code:'Space',key:' '});
-assert.ok(Number(await run(`document.getElementById('score').textContent`))>=1,'correctly timed right attack scores');
-await run(`document.getElementById('restart').click()`);
-assert.equal(await run(`document.getElementById('score').textContent`),'0');
-await send('Input.dispatchKeyEvent',{type:'keyDown',code:'ArrowUp',key:'ArrowUp'});await send('Input.dispatchKeyEvent',{type:'keyDown',code:'ArrowLeft',key:'ArrowLeft'});
-assert.equal(await run(`document.getElementById('technique').textContent`),'上段受け・反击');
-for(const code of ['ArrowUp','ArrowLeft'])await send('Input.dispatchKeyEvent',{type:'keyUp',code,key:code});
-await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:2});await delay(200);
-assert.ok(await run('document.documentElement.scrollWidth<=innerWidth'),'mobile no horizontal overflow');
-const coords=await run(`(()=>{const a=document.getElementById('joystick').getBoundingClientRect(),b=document.getElementById('attack').getBoundingClientRect();return {x:a.x+a.width/2,y:a.y+10,bx:b.x+b.width/2,by:b.y+b.height/2}})()`);
-await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:coords.x,y:coords.y,id:1}]});
-await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:coords.x,y:coords.y,id:1},{x:coords.bx,y:coords.by,id:2}]});
-assert.equal(await run(`document.getElementById('technique').textContent`),'上段突');
-await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
-assert.equal(await run(`document.getElementById('knob').style.transform`),'');
-// Sensor APIs are mocked only in this test browser; physical iPhone hardware is not emulated.
-await run(`document.getElementById('motion').click()`);await delay(50);
-assert.ok((await run(`document.getElementById('motion-status').textContent`)).includes('未获允许'));
-await run(`window.motionTestPermission='granted';document.getElementById('motion').click()`);await delay(50);
-assert.equal(await run(`document.getElementById('motion').getAttribute('aria-pressed')`),'true');
-await run(`window.dispatchEvent(new Event('blur'));window.dispatchEvent(new Event('focus'));document.getElementById('restart').click();const e=new Event('devicemotion');e.acceleration={x:20,y:0,z:0};window.dispatchEvent(e)`);
-await delay(200);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
-await delay(750);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'grounded');
-await run(`document.getElementById('motion').click();document.getElementById('jump').click()`);
-await delay(200);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
-await delay(750);
-await send('Input.dispatchKeyEvent',{type:'keyDown',code:'KeyJ',key:'j'});
-await send('Input.dispatchKeyEvent',{type:'keyUp',code:'KeyJ',key:'j'});
-await delay(200);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
-await send('Emulation.setDeviceMetricsOverride',{width:844,height:390,deviceScaleFactor:1,mobile:true});await delay(200);
-assert.ok(await run(`(()=>{const c=document.getElementById('game').getBoundingClientRect(),j=document.getElementById('joystick').getBoundingClientRect(),a=document.getElementById('attack').getBoundingClientRect();return j.right<=c.left&&a.left>=c.right&&document.documentElement.scrollWidth<=innerWidth})()`),'landscape controls stay outside game canvas');
-await run(`document.getElementById('restart').click()`);await delay(10500);
-assert.equal(await run(`document.getElementById('title').textContent`),'道场失守');
-assert.equal(await run(`document.getElementById('misses').textContent`),'3');
-await run(`document.getElementById('restart').click();window.autoAttack=setInterval(()=>document.getElementById('attack').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true})),280)`);
-await delay(45000);
-assert.equal(await run(`document.getElementById('title').textContent`),'二十击，守护成功！');
-assert.equal(await run(`document.getElementById('score').textContent`),'20');
-await run('clearInterval(window.autoAttack)');
-assert.deepEqual(errors,[]);console.log('PASS: load, female selection, timed keyboard hit, restart, diagonal keyboard, mobile layout, two-finger touch, three-miss defeat, twenty-hit victory, joystick recenter, motion permission denial/grant, sensor jump, button/keyboard jump, landscape controls; no browser JS exceptions.');
-ws.close();
+import {browserSession,delay} from './cdp.mjs';
+const b=await browserSession(),{send,run}=b;
+try {
+  await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+    let testNow=0;let callbacks=[];
+    performance.now=()=>testNow;
+    window.requestAnimationFrame=f=>{callbacks.push(f);return callbacks.length;};
+    window.step=(seconds)=>{for(let i=0;i<Math.ceil(seconds*120);i++){testNow+=1000/120;const work=callbacks;callbacks=[];for(const f of work)f(testNow);}};
+    let seed=42;Math.random=()=>((seed=(seed*1664525+1013904223)>>>0)/4294967296);
+    window.motionTestPermission='denied';window.DeviceMotionEvent=class {static async requestPermission(){return motionTestPermission;}};
+    Object.defineProperty(window,'QiqianArcade',{configurable:true,set(api){const Original=api.World;api.World=class extends Original{constructor(...args){super(...args);window.testWorld=this;}};Object.defineProperty(window,'QiqianArcade',{value:api,configurable:true});}});
+  `});
+  const base=process.env.TEST_URL||'http://127.0.0.1:8000/';
+  await send('Page.navigate',{url:base});
+  for(let i=0;i<100;i++){if(await run(`!!document.getElementById('start') && typeof testWorld!=='undefined'`))break;await delay(30);}
+  assert.equal(await run('document.title'),'七千武道 · 净心道场');
+  await run(`document.querySelector('[data-gender="female"]').click();document.getElementById('start').click();step(.01)`);
+  assert.equal(await run(`document.querySelector('[data-gender="female"]').getAttribute('aria-pressed')`),'true');
+  const key=async(code,type='keyDown')=>send('Input.dispatchKeyEvent',{type,code,key:code==='Space'?' ':code});
+  await key('KeyD');await run('step(.4)');await key('KeyD','keyUp');
+  assert.ok(await run('testWorld.player.x>520'),'WASD moves');
+  await key('ArrowUp');await key('ArrowLeft');await run('step(.05)');
+  assert.ok((await run(`document.getElementById('technique').textContent`)).startsWith('左上'));
+  await key('ArrowUp','keyUp');await key('ArrowLeft','keyUp');
+  await run(`window.dispatchEvent(new Event('blur'));step(2)`);const frozen=await run('testWorld.time');await run('step(1)');assert.equal(await run('testWorld.time'),frozen);
+  await run(`window.dispatchEvent(new Event('focus'));document.getElementById('restart').click();step(.1)`);
+  await send('Emulation.setDeviceMetricsOverride',{width:844,height:390,deviceScaleFactor:1,mobile:true});
+  await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:3});await delay(100);
+  await run('step(.05)');
+  const positions=await run(`(()=>{const point=id=>{const r=document.getElementById(id).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}};return {stick:point('joystick'),attack:point('attack'),jump:point('jump')}})()`);
+  const left={x:positions.stick.x+25,y:positions.stick.y,id:1},right={...positions.attack,id:2},jump={...positions.jump,id:3};
+  await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[left]});await run('step(.1)');
+  const x=await run('testWorld.player.x');
+  await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[left,right,jump]});await run('step(.20)');
+  assert.ok(await run(`testWorld.player.x>${x}`),'stick continues while attack and jump are pressed');
+  assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+  assert.ok(await run('!!testWorld.player.attack'),'third finger did not cancel attack');
+  await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await run('step(.01)');
+  assert.equal(await run(`document.getElementById('knob').style.transform`),'');
+  const stopped=await run('testWorld.player.x');await run('step(.15)');assert.equal(await run('testWorld.player.x'),stopped);
+  for(const [width,height] of [[667,375],[844,390],[1024,768],[1366,768]]){
+    await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:true});await delay(50);
+    assert.ok(await run(`(()=>{const box=id=>document.getElementById(id).getBoundingClientRect(),c=box('game'),j=box('joystick'),a=box('attack'),b=box('jump');return j.right<=c.left && a.left>=c.right && [j,a,b].every(r=>r.left>=0&&r.top>=0&&r.right<=innerWidth&&r.bottom<=innerHeight)&&document.documentElement.scrollWidth<=innerWidth&&document.documentElement.scrollHeight<=innerHeight})()`),`${width}x${height} controls fit outside canvas`);
+  }
+  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await delay(50);
+  assert.equal(await run(`document.getElementById('rotate').hidden`),false);const t=await run('testWorld.time');await run('step(1)');assert.equal(await run('testWorld.time'),t);
+  await send('Emulation.setDeviceMetricsOverride',{width:844,height:390,deviceScaleFactor:1,mobile:true});await delay(50);
+  assert.equal(await run(`document.getElementById('rotate').hidden`),true);
+  await run(`document.getElementById('settings-toggle').click();document.getElementById('motion').click()`);
+  assert.ok((await run(`document.getElementById('motion-status').textContent`)).includes('未获允许'));
+  await run(`motionTestPermission='granted';document.getElementById('motion').click()`);
+  assert.equal(await run(`document.getElementById('motion').getAttribute('aria-pressed')`),'true');
+  await run(`document.getElementById('settings-close').click();document.getElementById('restart').click();const e=new Event('devicemotion');e.acceleration={x:20,y:0,z:0};window.dispatchEvent(e);step(.2)`);
+  assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+  await run(`step(.8);document.getElementById('jump').click();step(.2)`);assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+  await run('step(.8)');await key('KeyJ');await key('KeyJ','keyUp');await run('step(.2)');assert.equal(await run(`document.getElementById('game').dataset.jumpPhase`),'airborne');
+  await run(`document.getElementById('restart').click();step(60)`);
+  assert.equal(await run(`document.getElementById('title').textContent`),'道场失守');assert.equal(await run(`document.getElementById('misses').textContent`),'3');
+  await run(`document.getElementById('restart').click()`);
+  // Use normal keyboard events to aim/attack and jump, reading targets only from the test-side World reference.
+  const result=await run(`(()=>{
+    const codes=['ArrowRight','ArrowDown','ArrowLeft','ArrowUp'];
+    for(let t=0;t<150*30 && testWorld.state==='playing';t++){
+      const p=testWorld.player;let nearest=null,distance=Infinity;
+      for(const e of testWorld.enemies){const d=Math.hypot(e.x-p.x,e.y-p.y);if(d<distance){nearest=e;distance=d;}}
+      if(nearest){
+        const d=(Math.round(Math.atan2(nearest.y-p.y,nearest.x-p.x)/(Math.PI/4))+8)%8;
+        const x=Math.round(Math.cos(d*Math.PI/4)),y=Math.round(Math.sin(d*Math.PI/4));
+        const held=[];if(x)held.push(x>0?'ArrowRight':'ArrowLeft');if(y)held.push(y>0?'ArrowDown':'ArrowUp');
+        for(const code of held)window.dispatchEvent(new KeyboardEvent('keydown',{code,cancelable:true}));
+        // Aiming is latched on keydown; release before advancing so the bot stays in the central stance.
+        for(const code of held)window.dispatchEvent(new KeyboardEvent('keyup',{code}));
+        if(distance<211)window.dispatchEvent(new KeyboardEvent('keydown',{code:'Space',cancelable:true}));
+      }
+      const o=testWorld.obstacle;if(o&&o.warning<=0&&o.x>p.x-100&&o.x<p.x-32)window.dispatchEvent(new KeyboardEvent('keydown',{code:'KeyJ',cancelable:true}));
+      step(1/30);
+    }
+    return {state:testWorld.state,score:testWorld.score,misses:testWorld.misses};
+  })()`);
+  assert.equal(result.state,'won',JSON.stringify(result));assert.equal(result.score,20);
+  assert.equal(await run(`document.getElementById('title').textContent`),'二十击，守护成功！');
+  assert.deepEqual(b.errors,[]);
+  console.log('PASS: real DOM/Canvas loading, character selection, WASD/diagonal movement, blur pause, three-finger move/attack/jump, recenter, four landscape sizes, portrait pause/resume, iOS permission denial/grant mocks, sensor/button/keyboard jump, 3-miss defeat, keyboard-driven 20-hit victory.');
+} finally {await b.close();}
